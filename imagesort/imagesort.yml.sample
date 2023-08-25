@@ -1,0 +1,4 @@
+destination: /home/scheel/pictures
+cameras:
+  - id: SX740
+    name: Canon Powershot SX740 HS
