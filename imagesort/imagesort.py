@@ -9,10 +9,13 @@ import sqlite3
 import datetime
 import hashlib
 import shutil
+from exiftool import ExifToolHelper
+import json
 
 
 class DB:
     def __init__(self, **kwargs):
+        self.log = kwargs.get('log')
         self.db_file = os.path.splitext(os.path.abspath(__file__))[0] + ".db"
         self.db = sqlite3.connect(
             self.db_file,
@@ -29,6 +32,7 @@ class DB:
                 value CHAR
             )
         """
+        self.log.debug(f'Executing: \n{sql}')
         cur.execute(sql)
 
         sql = """
@@ -40,6 +44,7 @@ class DB:
                 make CHAR
             )
         """
+        self.log.debug(f'Executing: \n{sql}')
         cur.execute(sql)
         sql = """
         CREATE TABLE IF NOT EXISTS
@@ -52,6 +57,7 @@ class DB:
                 camera_id INT
             )
         """
+        self.log.debug(f'Executing: \n{sql}')
         cur.execute(sql)
         default = os.path.join(os.path.expanduser("~"), "pictures")
         while not self.get_destination():
@@ -61,14 +67,18 @@ class DB:
                 continue
             sql = "INSERT INTO settings (setting, value) VALUES (?, ?)"
             params = ("destination", destination)
+            self.log.debug(f'Executing: \n{sql}')
+            self.log.debug(f'  with params: {params}')
             cur.execute(sql, params)
 
         self.db.commit()
 
-    def get_destination(self):
+    def get_setting(self, setting):
         sql = "SELECT value FROM settings WHERE setting = ?"
-        params = ("destination", )
+        params = (setting, )
         cur = self.db.cursor()
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
         cur.execute(sql, params)
         results = cur.fetchone()
         if not results:
@@ -76,10 +86,15 @@ class DB:
         else:
             return results[0]
 
+    def get_destination(self):
+        return self.get_setting("destination")
+
     def camera_model_exists(self, model):
         sql = "SELECT count(*) FROM camera WHERE model = ?"
         params = (model, )
         cur = self.db.cursor()
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
         cur.execute(sql, params)
         return cur.fetchone()[0] != 0
 
@@ -92,6 +107,8 @@ class DB:
         sql    = "INSERT INTO camera (make, model, name, description) VALUES (?, ?, ?, ?)"
         params = (_make, _model, _name, _desc)
         cur    = self.db.cursor()
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
         cur.execute(sql, params)
         self.db.commit()
 
@@ -101,6 +118,8 @@ class DB:
         sql = "SELECT name FROM camera WHERE model = ?"
         params = (model, )
 
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
         cur.execute(sql, params)
         result = cur.fetchone()[0]
         return result
@@ -111,26 +130,106 @@ class DB:
         sql = "SELECT rowid FROM camera WHERE model = ?"
         params = (model, )
 
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
         cur.execute(sql, params)
         result = cur.fetchone()
         return result[0]
 
-
-    def image_exists_in_db(self, image):
-        sql = "SELECT count(*) FROM media WHERE sha256sum = ?"
-        params = (image.sha256sum,)
+    def get_camera_from_id(self, camera_id):
+        sql = """
+        SELECT
+            make,
+            model,
+            name,
+            description
+        FROM
+            camera
+        WHERE
+            rowid = ?
+        """
+        params = (camera_id, )
         cur = self.db.cursor()
+
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
+
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'make':        row[0],
+            'model':       row[1],
+            'name':        row[2],
+            'description': row[3],
+        }
+
+    def get_files(self):
+        sql = "SELECT filename_new FROM media"
+        cur = self.db.cursor()
+
+        self.log.debug(f'Executing: \n{sql}')
+
+        cur.execute(sql)
+        for row in cur.fetchall():
+            yield row[0]
+
+    def get_file_details(self, filename):
+        sql = """
+        SELECT
+            filename_original,
+            filename_new,
+            sha256sum,
+            size,
+            create_date,
+            camera_id
+        FROM
+            media
+        WHERE
+            filename_new = ?
+        """
+        params = (filename,)
+        cur = self.db.cursor()
+
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
+
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        camera = self.get_camera_from_id(row[5])
+        return {
+            'filename_original':  row[0],
+            'filename_new':       row[1],
+            'sha256sum':          row[2],
+            'size':               row[3],
+            'create_date':        row[4],
+            'camera_id':          row[5],
+            'camera_make':        camera['make'],
+            'camera_model':       camera['model'],
+            'camera_short':       camera['name'],
+            'camera_description': camera['description'],
+        }
+
+    def file_exists_in_db(self, media):
+        sql = "SELECT count(*) FROM media WHERE sha256sum = ?"
+        params = (media.sha256sum,)
+        cur = self.db.cursor()
+
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
+
         cur.execute(sql, params)
         return cur.fetchone()[0] != 0
 
-    def insert_image_into_db(self, image):
-        oldname     = os.path.split(image.filename)[1]
-        newname     = image.newname
-        checksum    = image.sha256sum
-        size        = image.size
-        create_date = image.date
-        camera_id   = self.camera_id_from_model(image.model)
-        if self.image_exists_in_db(image):
+    def insert_image_into_db(self, media):
+        oldname     = os.path.split(media.filename)[1]
+        newname     = media.newname
+        checksum    = media.sha256sum
+        size        = media.size
+        create_date = media.date
+        camera_id   = self.camera_id_from_model(media.model)
+        if self.file_exists_in_db(media):
             return False
         sql = """
         INSERT INTO
@@ -152,10 +251,12 @@ class DB:
             camera_id
         )
         cur = self.db.cursor()
+
+        self.log.debug(f'Executing: \n{sql}')
+        self.log.debug(f'  with params: {params}')
+
         cur.execute(sql, params)
         return True
-
-
 
 
 class Media:
@@ -179,33 +280,39 @@ class Media:
         self.__md5sum    = None
         self.__newname   = None
 
-        self.exifmap = {
-            "make": 271,
-            "model": 272,
-            "orientation": 274,
-            "datetime": 306
+        self.exts = {
+            "image": (
+                "jpg",
+                "jpeg",
+                "tif",
+                "tiff",
+                "raw",
+                "png",
+                "bmp",
+            ),
+            "video": (
+                "mp4",
+            ),
+            "future": (
+                "mp3",
+                "wav",
+                "flac",
+                "mkv",
+                "avi",
+            )
         }
-        self.image_exts = (
-            "jpg",
-            "jpeg",
-            "tif",
-            "tiff",
-            "raw",
-            "png"
-        )
 
     def _get_exif_value(self, key):
-        if isinstance(key, int):
-            for k, v in self.exif.items():
-                if k == key:
-                    return v
-        else:
-            # Gave us a string?  Find it in the map and use that integer.
-            # Call this recursively.
-            return self._get_exif_value(self.exifmap[key])
+        return self.exif[key]
+
+    def recognized(self):
+        return self.is_image() or self.is_video()
+
+    def is_video(self):
+        return self.ext in self.exts['video']
 
     def is_image(self):
-        return self.ext in self.image_exts
+        return self.ext in self.exts['image']
 
     @property
     def sha256sum(self):
@@ -228,19 +335,26 @@ class Media:
     @property
     def make(self):
         if not self.__make:
-            self.__make = self._get_exif_value("make")
+            self.__make = self._get_exif_value("EXIF:Make")
         return self.__make
     
     @property
     def model(self):
         if not self.__model:
-            self.__model = self._get_exif_value("model")
+            self.__model = self._get_exif_value("EXIF:Model")
         return self.__model
 
     @property
     def exif(self):
         if not self.__exif:
-            self.__exif = Image.open(self.filename).getexif()
+            # self.__exif = Image.open(self.filename).getexif()
+            self.__exif = {}
+            with ExifToolHelper() as et:
+                for data in et.get_metadata(self.filename):
+                    for key, value in data.items():
+                        if self.__exif.get(key):
+                            raise Exception(f"Key {key} exists twice in {self.filename} metadata")
+                        self.__exif[key] = value
         return self.__exif
     
     @property
@@ -252,7 +366,7 @@ class Media:
     @property
     def date(self):
         if not self.__date:
-            self.__date = datetime.datetime.strptime(self._get_exif_value("datetime"), self.dateformat)
+            self.__date = datetime.datetime.strptime(self._get_exif_value("EXIF:CreateDate"), self.dateformat)
         return self.__date
 
     @property
@@ -261,7 +375,7 @@ class Media:
             _name = self.db._get_camera_name_from_model(self.model)
             _date = self.date
             _datedir = _date.strftime("%Y-%m")
-            _newname = _date.strftime("%Y-%m-%d %H.%M.%S") + "." + self.ext
+            _newname = _date.strftime("%Y-%m-%d %H.%M.%S") + "." + _name + "." + self.ext
 
             self.__newname = os.path.join(
                 _name,
@@ -284,9 +398,20 @@ class ImageSort:
         )
         logging.getLogger("PIL.TiffImagePlugin").setLevel(logging.INFO)
 
-        self.db = DB()
+        self.db = DB(log=self.log)
 
         self.update_threshold = 25
+
+    def verify(self):
+        _check_checksums = self.args.checksums
+        for _file in self.db.get_files():
+            self.log.debug(f"Found file: {_file}")
+            details = self.db.get_file_details(_file)
+            filename = os.path.join(self.db.get_destination(), details['filename_new'])
+            if not os.path.exists(filename):
+                self.db.delete_file(details['filename_new'])
+            if _check_checksums and details['sha256sum'] != self.sha256sum(filename):
+                self.checksum_dont_match('filename_new')
 
     def _ask_yesno_question(self, message, default=None):
         if default:
@@ -358,7 +483,18 @@ class ImageSort:
         self.log.debug(f"Inserted: {inserted}")
         copied   = self._copy(image)
         self.log.debug(f"Copied: {copied}")
+        return copied or inserted
 
+    def sha256sum(self, filename):
+        sha = hashlib.sha256()
+        BUFSIZE = 4096
+        with open(filename, 'rb') as f_in:
+            while True:
+                data = f_in.read(BUFSIZE)
+                if not data:
+                    break
+                sha.update(data)
+        return sha.hexdigest()
 
     def sort(self):
         count = 0
@@ -368,8 +504,8 @@ class ImageSort:
                 self.log.info(f"File: {filename}")
                 _image = Media(filename=filename, db=self.db)
 
-                if not _image.is_image():
-                    continue                
+                if not _image.recognized():
+                    continue
 
                 if not self.db.camera_model_exists(_image.model):
                     _name, _desc = self._new_camera(_image.model)
@@ -384,14 +520,24 @@ class ImageSort:
                     count += 1
                     if count % self.update_threshold == 0:
                         self.db.db.commit()
+        self.db.db.commit()
 
 
 def scandir(args):
     sort = ImageSort(args)
     sort.sort()
 
+def verify(args):
+    sort = ImageSort(args)
+    sort.verify()
+
 
 def main():
+    # path = os.path.join(os.path.expanduser('~'), 'imagesort-py', 'images', 'sx740', 'MVI_3434.MP4')
+    # vid = MediaVideo()
+    # vid2 = vid.testmetadata(path)
+    # sys.exit()
+
     parser = argparse.ArgumentParser()
     subs = parser.add_subparsers()
     
@@ -409,6 +555,23 @@ def main():
         action="store_true"
     )
     sub_scandir.set_defaults(func=scandir)
+
+    sub_verify = subs.add_parser(
+        "verify",
+        help="Verify stored images"
+    )
+    sub_verify.add_argument(
+        "-c",
+        "--checksums",
+        help="Verify stored checksums (Can add considerable time to verification process.)",
+        action="store_true"
+    )
+    sub_verify.add_argument(
+        "--debug",
+        help="Debug logging.",
+        action="store_true"
+    )
+    sub_verify.set_defaults(func=verify)
 
     args = parser.parse_args(sys.argv[1:])
     if hasattr(args, "func"):
